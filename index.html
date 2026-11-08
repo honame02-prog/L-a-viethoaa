@@ -202,6 +202,26 @@ async function parseMht(file, report = [], refs = new Set()){
   return out;
 }
 
+// Đoán tiêu đề của một link từ chữ xung quanh nó (thẻ <a>, title/alt, tiêu đề, JSON "title")
+function contextLabel(txt, at, len, prevEnd){
+  const clean = t => t.replace(/&amp;/g, "&").replace(/&nbsp;/g, " ").replace(/&quot;/g, '"').replace(/&#39;/g, "'")
+    .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(+n)).replace(/\s+/g, " ").trim();
+  // Chỉ xét chữ nằm SAU link liền trước, để không "mượn" tiêu đề của video khác.
+  const from = Math.max(prevEnd, at - 900);
+  const before = txt.slice(from, at), after = txt.slice(at + len, at + len + 700);
+  let m = /^[^<>]*>\s*([^<]{2,120}?)\s*</.exec(after);               // <a href=URL>Tiêu đề</a>
+  if (m && clean(m[1]) && !/^https?:/i.test(clean(m[1]))) return clean(m[1]);
+  m = /^[^<>]*?(?:title|alt|aria-label|data-title|data-name)=["']([^"']{2,120})["']/i.exec(after);
+  if (m) return clean(m[1]);
+  const cands = [];                                                  // ứng viên phía trước, chọn cái gần link nhất
+  for (const r of [
+    /(?:title|alt|aria-label|data-title|data-name)=["']([^"']{2,120})["']/gi,
+    /["'](?:title|name|label|lesson|caption)["']\s*:\s*["']([^"']{2,120})["']/gi,
+    />\s*([^<>]{3,100}?)\s*<\/(?:h[1-6]|strong|b|p|li|td|span|div)>/gi,
+  ]) for (const x of before.matchAll(r)) cands.push({pos: x.index, text: clean(x[1])});
+  cands.sort((x, y) => y.pos - x.pos);
+  return (cands.find(c => c.text && !/^https?:/i.test(c.text)) || {text: ""}).text;
+}
 const LINK_RE = /(?:https?:)?\/\/[^\s"'<>\\^`{}|]+|blob:[^\s"'<>\\]+/gi;
 const VIDEO_LINK = /m3u8|mpd(\?|$|#)|\.(mp4|webm|mov|mkv|m4v|ogv|ts|m4s)(\?|$|#)/i;
 
@@ -232,10 +252,16 @@ async function collectRefs(body, type, enc, refs){
   if (/mpegurl/.test(type)) { // playlist nhúng: liệt kê cả dòng URL
     for (const line of txt.split(/\r?\n/)) if (/^https?:\/\//i.test(line.trim())) refs.add(line.trim());
   }
+  refs.labels ||= new Map();
+  let prevEnd = 0;
   for (const m of txt.matchAll(LINK_RE)) {
+    const myPrev = prevEnd; prevEnd = m.index + m[0].length;
     let u = m[0].replace(/[.,;:!?)\]]+$/, "");
     if (u.startsWith("//")) u = "https:" + u;
-    if (VIDEO_LINK.test(u) || u.startsWith("blob:")) refs.add(u);
+    if (VIDEO_LINK.test(u) || u.startsWith("blob:")) {
+      refs.add(u);
+      if (!refs.labels.has(u)) { const l = contextLabel(txt, m.index, m[0].length, myPrev); if (l) refs.labels.set(u, l); }
+    }
   }
 }
 
@@ -290,20 +316,22 @@ const shq = u => "'" + u.replace(/'/g, "'\\''") + "'";                  // bash/
 const dq  = u => '"' + u.replace(/"/g, '""') + '"';  // Windows Command Prompt (gõ trực tiếp; nếu đặt trong .bat thì cần đổi % thành %%)
 function cmds(u, kind, out){
   if (kind === "direct") return [["Mac/Linux", `curl -L -o ${shq(out)} ${shq(u)}`], ["Windows", `curl -L -o "${out}" ${dq(u)}`]];
-  return [["Mac/Linux", `ffmpeg -i ${shq(u)} -c copy ${shq(out)}`], ["Windows", `ffmpeg -i ${dq(u)} -c copy "${out}"`]];
+  // -nostdin: để ffmpeg không "ăn" các dòng lệnh dán phía sau khi chạy nhiều lệnh liền nhau
+  return [["Mac/Linux", `ffmpeg -nostdin -i ${shq(u)} -c copy ${shq(out)}`], ["Windows", `ffmpeg -nostdin -i ${dq(u)} -c copy "${out}"`]];
 }
+const safeName = (t, fallback) => (t || fallback).replace(/[\\/:*?"<>|\x00-\x1f]/g, " ").replace(/\s+/g, " ").trim().slice(0, 60) || fallback;
 const KIND = {
   master: ["⭐ Playlist chính (master)", "Chứa mọi chất lượng. ffmpeg tự chọn chất lượng cao nhất."],
   variant: ["🎞 Playlist theo chất lượng", "Mỗi link là một độ phân giải riêng."],
-  playlist: ["📄 Playlist .m3u8 (chưa rõ loại)", "Thử link này nếu không có master."],
+  playlist: ["📄 Playlist .m3u8 (mỗi link thường là một video khác nhau)", "Đối chiếu tiêu đề bên dưới để chọn đúng video."],
   dash: ["📄 Manifest DASH (.mpd)", "Dùng được với ffmpeg như m3u8."],
   direct: ["▶ Video trực tiếp", "Có thể tải thẳng bằng curl."],
 };
 const TA_STYLE = "width:100%;background:var(--bg);color:var(--fg);border:1px solid var(--line);border-radius:8px;padding:6px;font:12px monospace";
 
-function linkCard(u, kind, out, extra){
+function linkCard(u, kind, out, extra, label){
   const box = el("textarea", {value:u, readOnly:true, rows:Math.min(5, Math.ceil(u.length / 60)), style:TA_STYLE});
-  const card = el("div", {className:"item"}, el("div", {className:"meta", textContent:`${u.length} ký tự${u.includes("?") ? " · có token/tham số" : ""}${extra ? " · " + extra : ""}`}), box);
+  const card = el("div", {className:"item"}, ...(label ? [el("div", {style:"font-weight:600", textContent:label})] : []), el("div", {className:"meta", textContent:`${u.length} ký tự${u.includes("?") ? " · có token/tham số" : ""}${extra ? " · " + extra : ""}`}), box);
   const row = el("div"); const b = el("button", {className:"alt", textContent:"Sao chép link"}); b.onclick = () => copyText(u, b); row.append(b);
   if (kind !== "blob" && kind !== "segment") for (const [label, c] of cmds(u, kind, out)) {
     const cb = el("button", {textContent:"Lệnh " + (kind === "direct" ? "curl" : "ffmpeg") + " · " + label}); cb.onclick = () => copyText(c, cb); row.append(cb);
@@ -330,25 +358,37 @@ async function showLinks(blob){
       `Tìm thấy ${refs.size} liên kết · ${report.length} phần trong file. Sau khi gộp: ${n("master")} master, ${n("variant")} theo chất lượng, ${n("playlist")} playlist khác, ${n("direct")} video trực tiếp, ${n("dash")} DASH, ${n("segment")} đoạn video, ${n("blob")} blob, ${dupN} link trùng đường dẫn.`}));
     if (!refs.size) out.append(el("p", {className:"warn", textContent:"Không thấy liên kết video nào. Thử dán toàn bộ nội dung file."}));
     else out.append(el("p", {className:"meta", textContent:"👉 Thử link đầu tiên của nhóm đầu bên dưới. Nếu lỗi/hết hạn, thử link kế tiếp."}));
-    let idx = 0;
+    let idx = 0; const all = [];
     for (const k of ["master", "variant", "playlist", "dash", "direct"]) {
       if (!groups[k]) continue;
       const det = el("details", {open:true}, el("summary", {textContent:`${KIND[k][0]} (${groups[k].length})`, style:"font-weight:600;margin-top:12px"}), el("div", {className:"meta", textContent:KIND[k][1]}));
       for (const it of groups[k]) {
         idx++;
-        const outName = it.q ? `video-${it.q}p.mp4` : `video-${idx}.mp4`;
-        const card = linkCard(it.u, k, outName, it.q ? it.q + "p" : "");
+        const label = refs.labels && refs.labels.get(it.u) || "";
+        const outName = it.q && !label ? `video-${it.q}p.mp4` : `${String(idx).padStart(2, "0")} ${safeName(label, "video")}.mp4`;
+        it.outName = outName; all.push(it);
+        const card = linkCard(it.u, k, outName, it.q ? it.q + "p" : "", label);
         if (it.dups.length) card.append(el("details", {}, el("summary", {className:"meta", textContent:`+${it.dups.length} link cùng đường dẫn nhưng khác token`}),
-          ...it.dups.map(d => linkCard(d, k, outName, "khác token"))));
+          ...it.dups.map(d => linkCard(d, k, outName, "khác token", label))));
         det.append(card);
       }
       out.append(det);
+    }
+    if (all.length > 1) {
+      const bar = el("div", {className:"item"}, el("div", {style:"font-weight:600", textContent:`Tải tất cả ${all.length} video`}),
+        el("div", {className:"meta", textContent:"Sao chép một lần, dán vào Terminal/Command Prompt: chạy lần lượt từng video, mỗi video một file đặt tên theo tiêu đề."}));
+      ["Mac/Linux", "Windows"].forEach((os, i) => {
+        const b = el("button", {textContent:"Sao chép TẤT CẢ lệnh · " + os});
+        b.onclick = () => copyText(all.map(it => cmds(it.u, it.kind, it.outName)[i][1]).join("\n"), b);
+        bar.append(b);
+      });
+      out.insertBefore(bar, out.children[2] || null);
     }
     for (const k of ["segment", "blob"]) if (groups[k]) {
       const det = el("details", {}, el("summary", {className:"meta", textContent: k === "segment"
         ? `Đoạn video .ts/.m4s (${groups[k].length}) — không cần dùng, ffmpeg tự lấy qua playlist`
         : `Link blob: (${groups[k].length}) — chỉ tồn tại trong trang gốc, không tải được`}));
-      for (const it of groups[k]) det.append(linkCard(it.u, k, "", ""));
+      for (const it of groups[k]) det.append(linkCard(it.u, k, "", "", refs.labels && refs.labels.get(it.u) || ""));
       out.append(det);
     }
     out.append(el("p", {className:"meta", textContent:"Cách dùng: cài ffmpeg trên máy, mở Terminal (Mac/Linux) hoặc Command Prompt (Windows), dán lệnh đã sao chép rồi Enter. File video ra ở thư mục hiện tại."}));
