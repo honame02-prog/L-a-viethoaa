@@ -303,6 +303,7 @@ function classify(u){
   if (/^blob:/i.test(u)) return {kind:"blob"};
   const path = u.split("?")[0].split("#")[0], name = decodeSafe(path.split("/").filter(Boolean).pop() || "");
   if (/\.(ts|m4s|aac|vtt|webvtt|cmfv|cmfa)$/i.test(path)) return {kind:"segment"};
+  if (/\.(jpe?g|png|webp|gif|bmp|avif|ico|svg)$/i.test(path)) return {kind:"image", dir: path.slice(0, path.lastIndexOf("/") + 1)};
   const q = Math.max(0, ...[...u.matchAll(/(\d{3,4})p\b/g)].map(m => +m[1]));
   if (/m3u8/i.test(u)) {
     const master = /master|playlist|manifest|main|multi|all|auto/i.test(name) || /\/m3u8\/?$/i.test(path);
@@ -317,7 +318,7 @@ const dq  = u => '"' + u.replace(/"/g, '""') + '"';  // Windows Command Prompt (
 function cmds(u, kind, out){
   if (kind === "direct") return [["Mac/Linux", `curl -L -o ${shq(out)} ${shq(u)}`], ["Windows", `curl -L -o "${out}" ${dq(u)}`]];
   // -nostdin: để ffmpeg không "ăn" các dòng lệnh dán phía sau khi chạy nhiều lệnh liền nhau
-  return [["Mac/Linux", `ffmpeg -nostdin -i ${shq(u)} -c copy ${shq(out)}`], ["Windows", `ffmpeg -nostdin -i ${dq(u)} -c copy "${out}"`]];
+  return [["Mac/Linux", `ffmpeg -nostdin -allowed_extensions ALL -i ${shq(u)} -c copy ${shq(out)}`], ["Windows", `ffmpeg -nostdin -allowed_extensions ALL -i ${dq(u)} -c copy "${out}"`]];
 }
 const safeName = (t, fallback) => (t || fallback).replace(/[\\/:*?"<>|\x00-\x1f]/g, " ").replace(/\s+/g, " ").trim().slice(0, 60) || fallback;
 const KIND = {
@@ -333,7 +334,7 @@ function linkCard(u, kind, out, extra, label){
   const box = el("textarea", {value:u, readOnly:true, rows:Math.min(5, Math.ceil(u.length / 60)), style:TA_STYLE});
   const card = el("div", {className:"item"}, ...(label ? [el("div", {style:"font-weight:600", textContent:label})] : []), el("div", {className:"meta", textContent:`${u.length} ký tự${u.includes("?") ? " · có token/tham số" : ""}${extra ? " · " + extra : ""}`}), box);
   const row = el("div"); const b = el("button", {className:"alt", textContent:"Sao chép link"}); b.onclick = () => copyText(u, b); row.append(b);
-  if (kind !== "blob" && kind !== "segment") for (const [label, c] of cmds(u, kind, out)) {
+  if (kind !== "blob" && kind !== "segment" && kind !== "image") for (const [label, c] of cmds(u, kind, out)) {
     const cb = el("button", {textContent:"Lệnh " + (kind === "direct" ? "curl" : "ffmpeg") + " · " + label}); cb.onclick = () => copyText(c, cb); row.append(cb);
   }
   card.append(row); return card;
@@ -355,7 +356,7 @@ async function showLinks(blob){
     (groups.variant || []).sort((a, b) => b.q - a.q);
     const n = k => (groups[k] || []).length, dupN = [...seenPath.values()].reduce((t, i) => t + i.dups.length, 0);
     out.replaceChildren(el("p", {className:"meta", textContent:
-      `Tìm thấy ${refs.size} liên kết · ${report.length} phần trong file. Sau khi gộp: ${n("master")} master, ${n("variant")} theo chất lượng, ${n("playlist")} playlist khác, ${n("direct")} video trực tiếp, ${n("dash")} DASH, ${n("segment")} đoạn video, ${n("blob")} blob, ${dupN} link trùng đường dẫn.`}));
+      `Tìm thấy ${refs.size} liên kết · ${report.length} phần trong file. Sau khi gộp: ${n("master")} master, ${n("variant")} theo chất lượng, ${n("playlist")} playlist khác, ${n("direct")} video trực tiếp, ${n("dash")} DASH, ${n("segment")} đoạn video, ${n("image")} ảnh, ${n("blob")} blob, ${dupN} link trùng đường dẫn.`}));
     if (!refs.size) out.append(el("p", {className:"warn", textContent:"Không thấy liên kết video nào. Thử dán toàn bộ nội dung file."}));
     else out.append(el("p", {className:"meta", textContent:"👉 Thử link đầu tiên của nhóm đầu bên dưới. Nếu lỗi/hết hạn, thử link kế tiếp."}));
     let idx = 0; const all = [];
@@ -383,6 +384,19 @@ async function showLinks(blob){
         bar.append(b);
       });
       out.insertBefore(bar, out.children[2] || null);
+    }
+    if (groups.image) {
+      const dirs = {}; for (const it of groups.image) (dirs[it.dir] ||= []).push(it);
+      const big = Object.entries(dirs).filter(([, v]) => v.length >= 5).sort((a, b) => b[1].length - a[1].length);
+      const hasPl = n("master") + n("variant") + n("playlist") > 0;
+      const det = el("details", {}, el("summary", {className:"meta", textContent:
+        `Ảnh .jpg/.png (${groups.image.length}) — không phải video${big.length ? ", nhưng có thể là đoạn HLS ngụy trang đuôi ảnh" : ""}`}));
+      if (big.length) det.append(el("p", {className:"warn", textContent:
+        `Có ${big.length} thư mục chứa từ 5 ảnh trở lên (lớn nhất: ${big[0][1].length} file). Đây là dấu hiệu của đoạn video bị đổi đuôi thành .jpg. ` +
+        (hasPl ? "Bạn không cần tải từng ảnh: hãy dùng playlist .m3u8 ở trên (đã thêm -allowed_extensions ALL để ffmpeg nhận đoạn đuôi lạ)." : "Chưa thấy playlist .m3u8 nào trong file; cần tìm thêm link .m3u8 thật.")}));
+      for (const [d, v] of big.slice(0, 5)) det.append(el("div", {className:"meta", textContent:`${v.length} file trong: ${d.slice(0, 120)}`}));
+      for (const it of groups.image) det.append(linkCard(it.u, "image", "", "", refs.labels && refs.labels.get(it.u) || ""));
+      out.append(det);
     }
     for (const k of ["segment", "blob"]) if (groups[k]) {
       const det = el("details", {}, el("summary", {className:"meta", textContent: k === "segment"
