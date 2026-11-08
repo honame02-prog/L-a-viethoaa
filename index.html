@@ -36,7 +36,7 @@
   <div class="drop" id="drop">
     <p>Chọn <b>thư mục</b> chứa trang HTML (kèm video), hoặc chọn riêng file HTML + video.</p>
     <label class="btn">Chọn thư mục<input type="file" id="dir" webkitdirectory multiple></label>
-    <label class="btn alt">Chọn file<input type="file" id="files" multiple accept=".html,.htm,video/*"></label>
+    <label class="btn alt">Chọn file<input type="file" id="files" multiple accept=".html,.htm,.mht,.mhtml,video/*"></label>
     <p style="opacity:.7;font-size:.9rem;margin:8px 0 0">Hoặc kéo thả vào đây.</p>
   </div>
 
@@ -113,15 +113,78 @@ async function handle(fileList){
       if (f) add(f, relPath(page)); else missing.add(r);
     }
   }
+  // file .mht/.mhtml: video nhúng bên trong
+  const mhts = files.filter(f => /\.mht(ml)?$/i.test(f.name));
+  for (const m of mhts) {
+    statusEl.textContent = "Đang giải mã " + m.name + " …";
+    try { for (const v of await parseMht(m)) add(v, relPath(m)); }
+    catch (err) { listEl.append(el("p", {className:"warn", textContent:"Không đọc được " + m.name + ": " + err.message})); }
+  }
   // video được chọn trực tiếp
   for (const f of files) if (f.type.startsWith("video/") || /\.(mp4|webm|mov|mkv|m4v|ogv)$/i.test(f.name)) add(f, "(chọn trực tiếp)");
 
-  statusEl.textContent = pages.length ? `Đã quét ${pages.length} trang HTML, tìm thấy ${found.length} video.` : "Không có file HTML nào được chọn.";
+  statusEl.textContent = (pages.length + mhts.length) ? `Đã quét ${pages.length} trang HTML và ${mhts.length} file MHT, tìm thấy ${found.length} video.` : "Không có file HTML/MHT nào được chọn.";
   for (const {file, from} of found) listEl.append(card(file, from));
   if (external.size) listEl.append(el("p", {className:"warn", textContent:
     `${external.size} liên kết video trỏ tới máy chủ bên ngoài đã bị bỏ qua (app không kết nối mạng). Hãy lưu video về máy rồi chọn lại.`}));
   if (missing.size) listEl.append(el("p", {className:"warn", textContent:
     "Không tìm thấy trong thư mục đã chọn: " + [...missing].join(", ")}));
+}
+
+
+// ---------- MHTML (.mht): giải mã từng phần, hoàn toàn cục bộ ----------
+const L1 = new TextDecoder("latin1");
+const sliceText = async (blob, a, b) => L1.decode(await blob.slice(a, b).arrayBuffer());
+const MIME_EXT = {"video/mp4":"mp4","video/webm":"webm","video/ogg":"ogv","video/quicktime":"mov","video/x-matroska":"mkv","video/x-m4v":"m4v"};
+
+async function parseMht(file){
+  const head = await sliceText(file, 0, 65536);
+  const bm = /boundary\s*=\s*"?([^"\r\n;]+)"?/i.exec(head);
+  if (!bm) return [];
+  const marker = "--" + bm[1];
+  // 1) quét file theo khối 8MB để tìm vị trí các boundary (không nạp cả file vào RAM)
+  const CH = 8 << 20, pos = [];
+  for (let off = 0; off < file.size; off += CH) {
+    const text = await sliceText(file, off, Math.min(off + CH + marker.length, file.size));
+    for (let i = text.indexOf(marker); i !== -1 && i < CH + (off + CH >= file.size ? marker.length : 0); i = text.indexOf(marker, i + 1)) pos.push(off + i);
+  }
+  const out = [];
+  for (let k = 0; k < pos.length - 1; k++) {
+    const hs = await sliceText(file, pos[k], Math.min(pos[k] + 20000, pos[k + 1]));
+    const nl = hs.indexOf("\n"); if (nl < 0) continue;
+    const rest = hs.slice(nl + 1);
+    const m = /\r?\n\r?\n/.exec(rest); if (!m) continue;
+    const headers = rest.slice(0, m.index).replace(/\r?\n[ \t]+/g, " ");
+    const h = n => (new RegExp("^" + n + ":\\s*(.*)$", "im").exec(headers) || [])[1] || "";
+    const type = h("Content-Type").split(";")[0].trim().toLowerCase();
+    const loc = h("Content-Location").trim();
+    const enc = h("Content-Transfer-Encoding").trim().toLowerCase();
+    const name0 = decodeSafe(loc.split("?")[0].split("/").pop() || "");
+    if (!(type.startsWith("video/") || (type === "application/octet-stream" && VIDEO_EXT.test(name0)))) continue;
+    const start = pos[k] + nl + 1 + m.index + m[0].length, end = pos[k + 1];
+    const body = file.slice(start, end);
+    let blob;
+    if (enc === "base64") blob = await b64Blob(body, type);
+    else if (enc === "quoted-printable") continue; // không dùng cho video
+    else blob = new Blob([body.slice(0, Math.max(0, body.size - 2))], {type}); // bỏ CRLF cuối
+    const ext = MIME_EXT[type] || "mp4";
+    const name = VIDEO_EXT.test(name0) ? name0 : `video-mht-${out.length + 1}.${ext}`;
+    out.push(new File([blob], name, {type: type.startsWith("video/") ? type : "video/mp4"}));
+  }
+  return out;
+}
+
+async function b64Blob(body, type){
+  const parts = []; let carry = "";
+  const CH = 4 << 20; // giải mã theo khối 4MB
+  for (let off = 0; off < body.size; off += CH) {
+    let t = carry + (await sliceText(body, off, off + CH)).replace(/[^A-Za-z0-9+/=]/g, "");
+    const cut = t.length - (t.length % 4);
+    carry = t.slice(cut); t = t.slice(0, cut);
+    if (t) parts.push(Uint8Array.from(atob(t), c => c.charCodeAt(0)));
+  }
+  if (carry) parts.push(Uint8Array.from(atob(carry.padEnd(4, "=")), c => c.charCodeAt(0)));
+  return new Blob(parts, {type});
 }
 
 // data: URI → Blob, tự giải mã (không dùng mạng)
@@ -133,15 +196,34 @@ async function fetchData(uri){
   return new Blob([bytes], {type: m[1] || "video/mp4"});
 }
 
+// Android (WebView): ghi file vào thư mục Download theo từng khối 1MB, không qua mạng
+async function saveAndroid(file, btn){
+  const old = btn.textContent; btn.disabled = true;
+  try {
+    const id = AndroidSave.begin(file.name, file.type || "video/mp4");
+    const CH = 1 << 20;
+    for (let o = 0; o < file.size; o += CH) {
+      const buf = new Uint8Array(await file.slice(o, o + CH).arrayBuffer());
+      let bin = ""; for (let i = 0; i < buf.length; i += 0x8000) bin += String.fromCharCode.apply(null, buf.subarray(i, i + 0x8000));
+      AndroidSave.write(id, btoa(bin));
+      btn.textContent = Math.round(Math.min(o + CH, file.size) / file.size * 100) + "%";
+    }
+    btn.textContent = AndroidSave.end(id) ? "Đã lưu vào Download ✓" : "Lỗi khi lưu";
+  } catch (err) { btn.textContent = "Lỗi: " + err.message; }
+  setTimeout(() => { btn.textContent = old; btn.disabled = false; }, 3500);
+}
+
 function card(file, from){
   const url = URL.createObjectURL(file); urls.push(url);
   const v = el("video", {src:url, controls:true, preload:"metadata"});
   const a = el("a", {href:url, download:file.name}); // lưu bản sao trên máy
   const btn = el("button", {textContent:"Tải về"}); a.append(btn);
+  if (window.AndroidSave) a.addEventListener("click", e => { e.preventDefault(); saveAndroid(file, btn); });
   return el("div", {className:"item"}, v,
     el("div", {className:"meta", textContent:`${file.name} · ${fmt(file.size)} · từ ${from}`}), a);
 }
 
+if (window.AndroidSave) $("dir").parentElement.hidden = true;
 $("dir").onchange = e => handle(e.target.files);
 $("files").onchange = e => handle(e.target.files);
 const drop = $("drop");
