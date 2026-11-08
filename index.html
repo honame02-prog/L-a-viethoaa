@@ -114,10 +114,15 @@ async function handle(fileList){
     }
   }
   // file .mht/.mhtml: video nhúng bên trong
+  const mhtReports = [];
   const mhts = files.filter(f => /\.mht(ml)?$/i.test(f.name));
   for (const m of mhts) {
     statusEl.textContent = "Đang giải mã " + m.name + " …";
-    try { for (const v of await parseMht(m)) add(v, relPath(m)); }
+    try {
+      const report = [], refs = new Set();
+      for (const v of await parseMht(m, report, refs)) add(v, relPath(m));
+      mhtReports.push({name: m.name, size: m.size, report, refs});
+    }
     catch (err) { listEl.append(el("p", {className:"warn", textContent:"Không đọc được " + m.name + ": " + err.message})); }
   }
   // video được chọn trực tiếp
@@ -125,6 +130,7 @@ async function handle(fileList){
 
   statusEl.textContent = (pages.length + mhts.length) ? `Đã quét ${pages.length} trang HTML và ${mhts.length} file MHT, tìm thấy ${found.length} video.` : "Không có file HTML/MHT nào được chọn.";
   for (const {file, from} of found) listEl.append(card(file, from));
+  for (const r of mhtReports) listEl.append(mhtDetails(r));
   if (external.size) listEl.append(el("p", {className:"warn", textContent:
     `${external.size} liên kết video trỏ tới máy chủ bên ngoài đã bị bỏ qua (app không kết nối mạng). Hãy lưu video về máy rồi chọn lại.`}));
   if (missing.size) listEl.append(el("p", {className:"warn", textContent:
@@ -137,7 +143,7 @@ const L1 = new TextDecoder("latin1");
 const sliceText = async (blob, a, b) => L1.decode(await blob.slice(a, b).arrayBuffer());
 const MIME_EXT = {"video/mp4":"mp4","video/webm":"webm","video/ogg":"ogv","video/quicktime":"mov","video/x-matroska":"mkv","video/x-m4v":"m4v"};
 
-async function parseMht(file){
+async function parseMht(file, report = [], refs = new Set()){
   const head = await sliceText(file, 0, 65536);
   const bm = /boundary\s*=\s*"?([^"\r\n;]+)"?/i.exec(head);
   if (!bm) return [];
@@ -149,6 +155,7 @@ async function parseMht(file){
     for (let i = text.indexOf(marker); i !== -1 && i < CH + (off + CH >= file.size ? marker.length : 0); i = text.indexOf(marker, i + 1)) pos.push(off + i);
   }
   const out = [];
+  report.boundaryCount = pos.length;
   for (let k = 0; k < pos.length - 1; k++) {
     const hs = await sliceText(file, pos[k], Math.min(pos[k] + 20000, pos[k + 1]));
     const nl = hs.indexOf("\n"); if (nl < 0) continue;
@@ -160,18 +167,31 @@ async function parseMht(file){
     const loc = h("Content-Location").trim();
     const enc = h("Content-Transfer-Encoding").trim().toLowerCase();
     const name0 = decodeSafe(loc.split("?")[0].split("/").pop() || "");
-    if (!(type.startsWith("video/") || (type === "application/octet-stream" && VIDEO_EXT.test(name0)))) continue;
     const start = pos[k] + nl + 1 + m.index + m[0].length, end = pos[k + 1];
+    const size = Math.max(0, end - start);
+    const isVideo = type.startsWith("video/") || VIDEO_EXT.test(loc) ||
+      (type === "application/octet-stream" && size > 1 << 20) ||
+      (type.startsWith("audio/") && size > 1 << 20);
+    // "có thể là video": phần nhị phân lớn không phải ảnh/văn bản/font
+    const maybe = !isVideo && size > 2 << 20 && !/^(text|image|font)\//.test(type) && !/css|javascript|json|html|xml|font/.test(type);
+    report.push({type: type || "?", enc: enc || "?", loc, size, used: isVideo || maybe});
+    if (!(isVideo || maybe)) { collectRefs(rest.slice(m.index + m[0].length), type, refs, enc); continue; }
     const body = file.slice(start, end);
     let blob;
     if (enc === "base64") blob = await b64Blob(body, type);
     else if (enc === "quoted-printable") continue; // không dùng cho video
     else blob = new Blob([body.slice(0, Math.max(0, body.size - 2))], {type}); // bỏ CRLF cuối
-    const ext = MIME_EXT[type] || "mp4";
+    const ext = MIME_EXT[type] || (VIDEO_EXT.exec(name0) || [0, "mp4"])[1];
     const name = VIDEO_EXT.test(name0) ? name0 : `video-mht-${out.length + 1}.${ext}`;
     out.push(new File([blob], name, {type: type.startsWith("video/") ? type : "video/mp4"}));
   }
   return out;
+}
+
+function collectRefs(txt, type, refs, enc){
+  if (!/html/.test(type)) return;
+  if (/quoted/.test(enc)) txt = txt.replace(/=\r?\n/g, "").replace(/=([0-9A-F]{2})/gi, (_, h) => String.fromCharCode(parseInt(h, 16)));
+  for (const r of txt.matchAll(/(?:https?:)?\/\/[^\s"'<>)]+?\.(?:mp4|webm|m3u8|mov|mkv)[^\s"'<>)]*|blob:[^\s"'<>)]+/gi)) refs.add(r[0]);
 }
 
 async function b64Blob(body, type){
@@ -185,6 +205,17 @@ async function b64Blob(body, type){
   }
   if (carry) parts.push(Uint8Array.from(atob(carry.padEnd(4, "=")), c => c.charCodeAt(0)));
   return new Blob(parts, {type});
+}
+
+function mhtDetails({name, size, report, refs}){
+  const d = el("details", {className:"item"}, el("summary", {textContent:
+    `Chi tiết ${name} (${fmt(size)}): ${report.length} phần, ${refs.size} liên kết video không nhúng`}));
+  if (!report.length) d.append(el("p", {className:"warn", textContent:"Không nhận ra cấu trúc MIME/boundary nào trong file này — có thể không phải MHTML chuẩn."}));
+  const t = el("table", {style:"width:100%;font-size:.8rem;border-collapse:collapse;word-break:break-all"});
+  for (const x of report) t.append(el("tr", {}, ...[x.used ? "▶" : "", x.type, x.enc, fmt(x.size), x.loc.slice(0, 90)].map(c => el("td", {textContent:c, style:"border-top:1px solid var(--line);padding:2px 4px"}))));
+  d.append(t);
+  if (refs.size) d.append(el("p", {className:"warn", textContent:"Trang chỉ chứa liên kết tới video (video KHÔNG nằm trong file này): " + [...refs].slice(0, 10).join(" , ")}));
+  return d;
 }
 
 // data: URI → Blob, tự giải mã (không dùng mạng)
