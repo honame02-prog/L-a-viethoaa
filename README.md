@@ -9,6 +9,12 @@ Một file duy nhất: `index.html`. Mở bằng Chrome/Edge/Firefox (bấm đú
 4. **Phân tích chữ ký byte**: đọc dữ liệu thật của từng phần trong `.mht` (và của ảnh bạn tải về) để phát hiện đoạn video HLS (MPEG-TS/fMP4) **ngụy trang đuôi `.jpg`**, bỏ "đầu ảnh giả", rồi ghép theo thứ tự tên thành `.ts`/`.mp4`. Chỉ làm được khi nội dung thật sự có trong file hoặc bạn đã tải về máy; link trơn thì app offline không thể lấy nội dung.
 5. **Kiểm tra cách ly mạng**: tự thử fetch/XHR/WebSocket/beacon/ảnh/script ra ngoài và báo trình duyệt có chặn không.
 
+## Công cụ HLS online (tùy chọn): `hls_tool.py`
+Kiểm tra và tách video từ link `.m3u8` **không cần ffmpeg** (chỉ cần Python 3, không cài thêm thư viện). Đây là công cụ *tách riêng* vì muốn lấy video từ máy chủ thì bắt buộc phải có kết nối; `index.html` vẫn hoàn toàn offline.
+- `python hls_tool.py --check`: phân tích (số đoạn, mã hóa, đuôi file, đọc chữ ký byte của đoạn đầu → kết luận **HLS ngụy trang đuôi ảnh** hay chỉ là ảnh).
+- `python hls_tool.py`: tải, bỏ "đầu ảnh giả", giải mã AES-128 (khóa công khai của HLS), ghép đúng thứ tự thành `.ts`/`.mp4`.
+- An toàn: chỉ thư viện chuẩn; in **mọi máy chủ** sẽ kết nối và hỏi `[y/N]` trước; chặn redirect sang máy chủ chưa xác nhận; kiểm tra chứng chỉ HTTPS; che token khi hiển thị; từ chối `file://`; **từ chối DRM** (SAMPLE-AES) và không cố vượt DRM.
+
 ## Mô hình bảo mật (nói thẳng giới hạn)
 - Không thư viện, CDN, font, analytics. Không có mã nào gọi mạng, trừ các phép *thử* trong "Kiểm tra cách ly mạng" (đều nhắm `*.invalid`, bị chặn trước khi gửi).
 - CSP `default-src 'none'; connect-src 'none'; form-action 'none'; frame-src 'none'` → trình duyệt tự chặn mọi kết nối, kể cả khi mã có lỗi. Đã kiểm chứng bằng máy chủ cục bộ: **0 kết nối nhận được**.
