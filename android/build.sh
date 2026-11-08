@@ -4,9 +4,10 @@ set -euo pipefail
 : "${ANDROID_HOME:?hãy đặt ANDROID_HOME}"
 BT="$ANDROID_HOME/build-tools/34.0.0"; JAR="$ANDROID_HOME/platforms/android-34/android.jar"
 HERE="$(cd "$(dirname "$0")" && pwd)"; OUT="$HERE/out"; rm -rf "$OUT"; mkdir -p "$OUT/assets" "$OUT/classes"
-cp "$HERE/../index.html" "$OUT/assets/index.html"
+VC="${VERSION_CODE:-$(( $(date +%s) / 60 ))}"   # tăng dần theo thời gian để Android cho cài đè
+sed "s/phiên bản: dev/phiên bản: $VC/" "$HERE/../index.html" > "$OUT/assets/index.html"
 "$BT/aapt2" link -I "$JAR" --manifest "$HERE/app/src/main/AndroidManifest.xml" -A "$OUT/assets" \
-  --min-sdk-version 24 --target-sdk-version 34 --version-code 1 --version-name 1.0 -o "$OUT/base.apk"
+  --min-sdk-version 24 --target-sdk-version 34 --version-code "$VC" --version-name "1.0.$VC" -o "$OUT/base.apk"
 javac --release 11 -g:none -Xlint:-deprecation -cp "$JAR" -d "$OUT/classes" $(find "$HERE/app/src/main/java" -name '*.java')
 "$BT/d8" --min-api 24 --lib "$JAR" --output "$OUT" $(find "$OUT/classes" -name '*.class')
 cp "$OUT/base.apk" "$OUT/unsigned.apk"; (cd "$OUT" && zip -q -j unsigned.apk classes.dex)
