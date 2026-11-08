@@ -41,6 +41,24 @@
     <p style="opacity:.7;font-size:.9rem;margin:8px 0 0">Hoặc kéo thả vào đây.</p>
   </div>
 
+  <details class="item" id="vaultTool" open>
+    <summary><b>🔐 Két mã hóa video</b> <small>(AES-256-GCM, chạy trên máy bạn)</small></summary>
+    <p class="meta">Chọn video (hoặc bất kỳ file nào) để mã hóa thành file <code>.vault</code>; chọn file <code>.vault</code> để giải mã. Không có mật khẩu thì không ai đọc được — <b>kể cả người làm ra app này. Mất mật khẩu là mất dữ liệu vĩnh viễn.</b></p>
+    <label class="btn alt">Chọn file<input type="file" id="vFile"></label>
+    <input type="password" id="vPw" autocomplete="off" placeholder="Mật khẩu (≥ 12 ký tự)" style="width:100%;margin:4px 0;padding:9px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--fg);font:inherit">
+    <input type="password" id="vPw2" autocomplete="off" placeholder="Nhập lại mật khẩu (khi mã hóa)" style="width:100%;margin:4px 0;padding:9px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--fg);font:inherit">
+    <div><button id="vEnc">Mã hóa</button><button id="vDec" class="alt">Giải mã</button></div>
+    <progress id="vBar" max="100" value="0" hidden style="width:100%"></progress>
+    <p id="vMsg" class="meta" role="status"></p>
+  </details>
+
+  <details class="item" id="scTool">
+    <summary><b>🛡 Kiểm tra cách ly mạng</b></summary>
+    <p class="meta">Bấm để app tự thử kết nối ra ngoài bằng mọi cách thông dụng và báo trình duyệt có chặn hay không. Bạn tự xác minh, không cần tin lời ai.</p>
+    <button id="scGo">Chạy kiểm tra</button>
+    <div id="scOut"></div>
+  </details>
+
   <details class="item" id="linkTool" open>
     <summary><b>Xem liên kết video trong file MHT</b></summary>
     <p class="meta">Dán nội dung file <code>.mht</code> (hoặc một đoạn của nó) vào ô dưới, hoặc chọn file. App hiện <b>đầy đủ</b> các link video (kể cả phần sau dấu <code>?</code>). Mọi thứ xử lý ngay trên máy.</p>
@@ -289,6 +307,168 @@ function mhtDetails({name, size, report, refs}){
   if (refs.size) d.append(el("p", {className:"warn", textContent:"Trang chỉ chứa liên kết tới video (video KHÔNG nằm trong file này): " + [...refs].slice(0, 10).join(" , ")}));
   return d;
 }
+
+// ---------- KÉT MÃ HÓA: AES-256-GCM + PBKDF2-SHA256, chạy cục bộ bằng WebCrypto (không mạng) ----------
+// Định dạng .vault:  [8 magic][4 số vòng PBKDF2][4 cỡ khối][16 salt][8 tiền tố IV] = 40 byte (đầu file, được xác thực)
+// rồi các khối:      [4 độ dài][bản mã + 16 tag]. Khối 0 = tên/loại file (cũng được mã hóa); khối 1..n = dữ liệu.
+// Mỗi khối có IV riêng (tiền tố + số thứ tự) và AAD = đầu file + số thứ tự + cờ "khối cuối",
+// nên không thể đảo thứ tự, cắt cụt hay ghép khối từ file khác mà không bị phát hiện.
+const VMAGIC = new TextEncoder().encode("VOFFVLT1");
+const VCHUNK = 4 << 20, VITER = 600000, VHDR = 40;
+const u32 = n => { const b = new Uint8Array(4); new DataView(b.buffer).setUint32(0, n); return b; };
+const cat = (...a) => { const o = new Uint8Array(a.reduce((t, x) => t + x.length, 0)); let p = 0; for (const x of a) { o.set(x, p); p += x.length; } return o; };
+const chunkIv = (prefix, i) => cat(prefix, u32(i));
+const chunkAad = (hdr, i, fin) => cat(hdr, u32(i), Uint8Array.of(fin ? 1 : 0));
+
+async function deriveKey(pw, salt, iterations){
+  const base = await crypto.subtle.importKey("raw", new TextEncoder().encode(pw.normalize("NFKC")), "PBKDF2", false, ["deriveKey"]);
+  return crypto.subtle.deriveKey({name:"PBKDF2", hash:"SHA-256", salt, iterations}, base, {name:"AES-GCM", length:256}, false, ["encrypt", "decrypt"]);
+}
+
+async function vaultEncrypt(file, pw, writer, onProg){
+  const salt = crypto.getRandomValues(new Uint8Array(16)), prefix = crypto.getRandomValues(new Uint8Array(8));
+  const hdr = cat(VMAGIC, u32(VITER), u32(VCHUNK), salt, prefix);
+  const key = await deriveKey(pw, salt, VITER);
+  await writer.write(hdr);
+  const put = async (i, plain, fin) => {
+    const ct = new Uint8Array(await crypto.subtle.encrypt({name:"AES-GCM", iv:chunkIv(prefix, i), additionalData:chunkAad(hdr, i, fin)}, key, plain));
+    await writer.write(cat(u32(ct.length), ct));
+  };
+  await put(0, new TextEncoder().encode(JSON.stringify({name:file.name, type:file.type, size:file.size})), false);
+  let i = 1, off = 0;
+  do {
+    const end = Math.min(off + VCHUNK, file.size);
+    await put(i++, new Uint8Array(await file.slice(off, end).arrayBuffer()), end >= file.size);
+    off = end; onProg(off / (file.size || 1));
+  } while (off < file.size);
+  await writer.close();
+}
+
+async function vaultDecrypt(file, pw, openW, onProg){
+  const hdr = new Uint8Array(await file.slice(0, VHDR).arrayBuffer());
+  if (hdr.length < VHDR || !VMAGIC.every((b, k) => hdr[k] === b)) throw new Error("Đây không phải file két (.vault) hợp lệ.");
+  const iter = new DataView(hdr.buffer).getUint32(8), salt = hdr.slice(16, 32), prefix = hdr.slice(32, 40);
+  if (iter < 100000 || iter > 20000000) throw new Error("Tham số trong file không hợp lệ.");
+  const key = await deriveKey(pw, salt, iter);
+  let pos = VHDR;
+  const read = async () => {
+    if (pos + 4 > file.size) throw new Error("File bị cắt cụt hoặc hỏng.");
+    const len = new DataView(await file.slice(pos, pos + 4).arrayBuffer()).getUint32(0);
+    if (len < 16 || len > VCHUNK + 4096 || pos + 4 + len > file.size) throw new Error("File bị hỏng.");
+    const ct = await file.slice(pos + 4, pos + 4 + len).arrayBuffer(); pos += 4 + len; return ct;
+  };
+  const dec = (ct, i, fin) => crypto.subtle.decrypt({name:"AES-GCM", iv:chunkIv(prefix, i), additionalData:chunkAad(hdr, i, fin)}, key, ct);
+  let meta;
+  try { meta = JSON.parse(new TextDecoder().decode(await dec(await read(), 0, false))); }
+  catch { throw new Error("Sai mật khẩu, hoặc file đã bị sửa/hỏng."); }
+  const writer = await openW(String(meta.name || "video").replace(/[\\/:*?"<>|\x00-\x1f]/g, "_"));
+  try {
+    for (let i = 1; ; i++) {
+      const ct = await read(), last = pos >= file.size;
+      let plain; try { plain = new Uint8Array(await dec(ct, i, last)); } catch { throw new Error("File bị sửa, bị cắt cụt hoặc hỏng ở khối " + i + "."); }
+      await writer.write(plain); onProg(pos / file.size);
+      if (last) break;
+    }
+    await writer.close();
+  } catch (e) { await writer.abort(); throw e; }
+  return meta;
+}
+
+// Chọn nơi ghi: Android → Download; Chrome/Edge máy tính → ghi thẳng ra đĩa theo luồng; còn lại → tải Blob
+async function openWriter(name){
+  if (window.AndroidSave) {
+    const id = AndroidSave.begin(name, "application/octet-stream");
+    if (id < 0) throw new Error("Không tạo được file trong Download.");
+    return {
+      write: async u8 => { let bin = ""; for (let i = 0; i < u8.length; i += 0x8000) bin += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000)); AndroidSave.write(id, btoa(bin)); },
+      close: async () => { if (!AndroidSave.end(id)) throw new Error("Lỗi khi lưu."); },
+      abort: async () => { AndroidSave.end(id); },
+    };
+  }
+  if (window.showSaveFilePicker) {
+    try {
+      const w = await (await showSaveFilePicker({suggestedName:name})).createWritable();
+      return {write: u8 => w.write(u8), close: () => w.close(), abort: () => w.abort()};
+    } catch (e) { if (e.name === "AbortError") throw new Error("Đã hủy lưu."); }
+  }
+  const parts = [];
+  return {
+    write: async u8 => { parts.push(u8); },
+    abort: async () => { parts.length = 0; },
+    close: async () => {
+      const url = URL.createObjectURL(new Blob(parts)), a = el("a", {href:url, download:name});
+      document.body.append(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(url), 60000);
+    },
+  };
+}
+
+(function vaultUI(){
+  const f = $("vFile"), pw = $("vPw"), pw2 = $("vPw2"), msg = $("vMsg"), bar = $("vBar");
+  const say = (t, bad) => { msg.textContent = t; msg.style.color = bad ? "#dc2626" : ""; };
+  const busy = on => { $("vEnc").disabled = $("vDec").disabled = on; };
+  const prog = p => { bar.hidden = false; bar.value = Math.round(p * 100); };
+  const wipe = () => { pw.value = ""; pw2.value = ""; };
+  f.onchange = async () => {
+    const file = f.files[0]; if (!file) return;
+    const head = new Uint8Array(await file.slice(0, 8).arrayBuffer());
+    const isV = VMAGIC.every((b, k) => head[k] === b);
+    say(isV ? "Đây là file két (.vault) → nhập mật khẩu rồi bấm Giải mã." : "File thường → nhập mật khẩu (2 lần) rồi bấm Mã hóa.");
+  };
+  $("vEnc").onclick = async () => {
+    const file = f.files[0];
+    if (!file) return say("Hãy chọn file trước.", true);
+    if (pw.value.length < 12) return say("Mật khẩu cần ít nhất 12 ký tự (khuyên dùng cụm 5 từ ngẫu nhiên).", true);
+    if (pw.value !== pw2.value) return say("Hai lần nhập mật khẩu không khớp.", true);
+    busy(true); bar.hidden = true;
+    try {
+      const w = await openWriter(file.name + ".vault");   // mở hộp thoại lưu ngay lúc bấm
+      say("Đang mã hóa… (bước tạo khóa mất vài giây là bình thường)");
+      await vaultEncrypt(file, pw.value, w, prog);
+      say("Đã mã hóa xong ✓. Hãy tự giải mã thử một lần để chắc chắn nhớ đúng mật khẩu, rồi mới xóa file gốc.");
+    } catch (e) { say("Lỗi: " + e.message, true); }
+    wipe(); busy(false);
+  };
+  $("vDec").onclick = async () => {
+    const file = f.files[0];
+    if (!file) return say("Hãy chọn file .vault trước.", true);
+    if (!pw.value) return say("Hãy nhập mật khẩu.", true);
+    busy(true); bar.hidden = true; say("Đang kiểm tra mật khẩu…");
+    try {
+      const meta = await vaultDecrypt(file, pw.value, openWriter, prog);
+      say(`Đã giải mã ✓ (${meta.name}).`);
+    } catch (e) { say("Lỗi: " + e.message, true); }
+    wipe(); busy(false);
+  };
+})();
+
+// ---------- KIỂM TRA CÁCH LY MẠNG: tự thử kết nối ra ngoài và xác nhận trình duyệt chặn ----------
+async function selfCheck(){
+  const out = $("scOut"), rows = []; let viol = 0;
+  const onV = () => viol++; document.addEventListener("securitypolicyviolation", onV);
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  const test = async (label, fn) => {
+    const before = viol; try { await fn(); } catch {}
+    await sleep(150); rows.push([viol > before, label]);
+  };
+  // Đếm tài nguyên ngoài TRƯỚC khi chạy các phép thử (để không tự đếm chính mình)
+  const ext = performance.getEntriesByType("resource").filter(e => !/^(blob|data|file):/.test(e.name));
+  rows.push([ext.length === 0, `Trang không tải tài nguyên ngoài nào từ lúc mở (${ext.length} mục)`]);
+  const csp = document.querySelector('meta[http-equiv="Content-Security-Policy"]');
+  rows.push([!!csp && /default-src 'none'/.test(csp.content) && /connect-src 'none'/.test(csp.content), "Chính sách CSP chặn mạng đang được bật trong trang"]);
+  // Địa chỉ .invalid không tồn tại thật; nếu có bị chặn thì yêu cầu cũng không rời khỏi trình duyệt.
+  await test("fetch() ra ngoài bị trình duyệt chặn", () => fetch("https://self-check.invalid/a"));
+  await test("XMLHttpRequest ra ngoài bị chặn", () => { const x = new XMLHttpRequest(); x.open("GET", "https://self-check.invalid/b"); x.send(); });
+  await test("WebSocket ra ngoài bị chặn", () => { const w = new WebSocket("wss://self-check.invalid/c"); w.onerror = () => {}; });
+  await test("sendBeacon ra ngoài bị chặn", () => navigator.sendBeacon("https://self-check.invalid/d", "x"));
+  await test("Tải ảnh từ ngoài bị chặn", () => { new Image().src = "https://self-check.invalid/e.png"; });
+  await test("Tải script từ ngoài bị chặn", () => { const s = document.createElement("script"); s.src = "https://self-check.invalid/f.js"; document.head.append(s); s.remove(); });
+  document.removeEventListener("securitypolicyviolation", onV);
+  const ok = rows.every(r => r[0]);
+  out.replaceChildren(el("p", {style:"font-weight:600;color:" + (ok ? "#16a34a" : "#dc2626"), textContent: ok ? "✔ Đạt: trình duyệt chặn mọi đường ra mạng của trang này." : "✘ Có mục không đạt — đừng dùng cho dữ liệu nhạy cảm."}),
+    ...rows.map(([g, t]) => el("div", {className:"meta", textContent:(g ? "✔ " : "✘ ") + t})),
+    el("p", {className:"meta", textContent:"Lưu ý: kiểm tra này chứng minh trang không tự kết nối. Tiện ích (extension) của trình duyệt vẫn có thể đọc trang — hãy dùng cửa sổ ẩn danh đã tắt tiện ích, hoặc hồ sơ trình duyệt sạch, và ngắt mạng khi xử lý video nhạy cảm."}));
+}
+$("scGo").onclick = selfCheck;
 
 // ---------- Công cụ xem liên kết ----------
 function copyText(text, btn){

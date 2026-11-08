@@ -1,18 +1,26 @@
-# Trích xuất video offline
+# Trích xuất & bảo vệ video — công cụ OFFLINE
 
-Mở `index.html` bằng trình duyệt (double-click, không cần server). Chọn thư mục chứa trang HTML đã lưu + video, app liệt kê video trong trang để xem trước và tải về.
+Một file duy nhất: `index.html`. Mở bằng Chrome/Edge/Firefox (bấm đúp, không cần server, không cài gì).
 
-Hỗ trợ: trang `.html/.htm` (video qua `<video>`, `<source>`, liên kết, `data:`), file `.mht/.mhtml` (video base64 nhúng bên trong, giải mã theo khối 4MB), và video chọn trực tiếp.
+## Chức năng
+1. **Két mã hóa**: mã hóa video/file bất kỳ thành `.vault` bằng mật khẩu (AES-256-GCM, khóa từ PBKDF2-SHA256 600.000 vòng). Giải mã lại bằng đúng mật khẩu.
+2. **Trích xuất video** từ trang `.html` đã lưu và từ `.mht/.mhtml` (video base64 nhúng bên trong).
+3. **Xem liên kết video trong MHT**: hiện link đầy đủ, gom nhóm (master / chất lượng / ảnh / đoạn / blob), tạo sẵn lệnh `ffmpeg`/`curl` để chạy trên máy bạn.
+4. **Kiểm tra cách ly mạng**: tự thử fetch/XHR/WebSocket/beacon/ảnh/script ra ngoài và báo trình duyệt có chặn không.
+
+## Mô hình bảo mật (nói thẳng giới hạn)
+- Không thư viện, CDN, font, analytics. Không có mã nào gọi mạng, trừ các phép *thử* trong "Kiểm tra cách ly mạng" (đều nhắm `*.invalid`, bị chặn trước khi gửi).
+- CSP `default-src 'none'; connect-src 'none'; form-action 'none'; frame-src 'none'` → trình duyệt tự chặn mọi kết nối, kể cả khi mã có lỗi. Đã kiểm chứng bằng máy chủ cục bộ: **0 kết nối nhận được**.
+- Mật khẩu chỉ nằm trong bộ nhớ trang và bị xóa khỏi ô nhập sau mỗi lần dùng; không lưu ở đâu cả. **Mất mật khẩu = mất dữ liệu, không ai khôi phục được.**
+- Mỗi khối 4 MB có IV riêng và được xác thực kèm số thứ tự + cờ "khối cuối": sửa 1 byte, đảo/cắt/thêm khối đều bị phát hiện. Tên file gốc cũng được mã hóa.
+- **Không bảo vệ được**: máy dính virus/keylogger; tiện ích trình duyệt đọc được trang; người nhìn màn hình lúc video đang phát; mật khẩu yếu. Không có "bảo mật tuyệt đối" — chỉ có thể làm mọi thứ chạy cục bộ và khóa dữ liệu bằng mật mã mạnh.
+
+## Khuyến nghị dùng cho dữ liệu nhạy cảm
+1. Chép `index.html` sang máy bằng USB (hoặc tải từ nguồn bạn tin), kiểm tra hash: `sha256sum index.html` (Windows: `certutil -hashfile index.html SHA256`) và so với `index.html.sha256` do chính bạn lưu lần đầu.
+2. **Ngắt mạng**, mở bằng cửa sổ ẩn danh đã tắt tiện ích (hoặc hồ sơ trình duyệt mới).
+3. Bấm "Chạy kiểm tra" → phải hiện "✔ Đạt".
+4. Dùng cụm mật khẩu ≥ 5 từ ngẫu nhiên. Giải mã thử trước khi xóa file gốc.
+5. Xóa file gốc bằng công cụ xóa an toàn nếu cần (xóa thường không xóa dữ liệu khỏi đĩa).
 
 ## Android (APK)
-`android/VideoOffline.apk` — cài trực tiếp (bật "Cài từ nguồn không xác định"). App là WebView nạp đúng `index.html`; **không khai báo quyền INTERNET** nên Android chặn mọi kết nối mạng ở cấp hệ điều hành. Video được lưu vào thư mục Download.
-Tự build lại: `ANDROID_HOME=<sdk> android/build.sh` (cần JDK 17+, platform-34, build-tools 34.0.0; không cần Gradle/Maven). Khoá ký `android/release.keystore` được tạo lần đầu và không đưa lên git — hãy giữ lại nếu muốn cập nhật đè bản cũ.
-
-## Bảo mật
-- Một file duy nhất, không thư viện/CDN/font ngoài.
-- CSP `connect-src 'none'`, `default-src 'none'`: trình duyệt chặn mọi fetch/XHR/WebSocket/tài nguyên ngoài.
-- Trang HTML được phân tích bằng `DOMParser` (không chạy script, không tải tài nguyên).
-- Liên kết `http(s)://` bị bỏ qua, không bao giờ được tải.
-- Video không rời khỏi máy bạn; không có telemetry.
-
-Để chắc chắn tuyệt đối, hãy tắt mạng khi dùng và chép file này sang máy của bạn. Không cần đưa video cho bất kỳ ai/AI nào.
+`android/VideoOffline.apk` — WebView nạp đúng `index.html`, **không khai báo quyền INTERNET** (Android chặn mạng ở cấp hệ điều hành). File lưu vào Download. Tự build: `ANDROID_HOME=<sdk> android/build.sh` (JDK 17+, platform-34, build-tools 34.0.0). Khoá ký `android/release.keystore` không đưa lên git — hãy giữ lại.
