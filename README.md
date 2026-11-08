@@ -6,7 +6,8 @@ Một file duy nhất: `index.html`. Mở bằng Chrome/Edge/Firefox (bấm đú
 1. **Két mã hóa**: mã hóa video/file bất kỳ thành `.vault` bằng mật khẩu (AES-256-GCM, khóa từ PBKDF2-SHA256 600.000 vòng). Giải mã lại bằng đúng mật khẩu.
 2. **Trích xuất video** từ trang `.html` đã lưu và từ `.mht/.mhtml` (video base64 nhúng bên trong).
 3. **Xem liên kết video trong MHT**: hiện link đầy đủ, gom nhóm (master / chất lượng / ảnh / đoạn / blob), tạo sẵn lệnh `ffmpeg`/`curl` để chạy trên máy bạn.
-4. **Kiểm tra cách ly mạng**: tự thử fetch/XHR/WebSocket/beacon/ảnh/script ra ngoài và báo trình duyệt có chặn không.
+4. **Phân tích chữ ký byte**: đọc dữ liệu thật của từng phần trong `.mht` (và của ảnh bạn tải về) để phát hiện đoạn video HLS (MPEG-TS/fMP4) **ngụy trang đuôi `.jpg`**, bỏ "đầu ảnh giả", rồi ghép theo thứ tự tên thành `.ts`/`.mp4`. Chỉ làm được khi nội dung thật sự có trong file hoặc bạn đã tải về máy; link trơn thì app offline không thể lấy nội dung.
+5. **Kiểm tra cách ly mạng**: tự thử fetch/XHR/WebSocket/beacon/ảnh/script ra ngoài và báo trình duyệt có chặn không.
 
 ## Mô hình bảo mật (nói thẳng giới hạn)
 - Không thư viện, CDN, font, analytics. Không có mã nào gọi mạng, trừ các phép *thử* trong "Kiểm tra cách ly mạng" (đều nhắm `*.invalid`, bị chặn trước khi gửi).

@@ -201,12 +201,18 @@ async function parseMht(file, report = [], refs = new Set()){
     const name0 = decodeSafe(loc.split("?")[0].split("/").pop() || "");
     const start = pos[k] + nl + 1 + m.index + m[0].length, end = pos[k + 1];
     const size = Math.max(0, end - start);
-    const isVideo = type.startsWith("video/") || VIDEO_EXT.test(loc) ||
+    const skipSniff = (/html|css|javascript|json|xml|font/.test(type) && !/mpegurl/.test(type)) || /quoted/.test(enc) || !size;
+    const sn = skipSniff ? {kind:"text", offset:0} : sniff(await headBytes(file.slice(start, end), enc, 9000));
+    const sniffVideo = (sn.kind === "mp4" || sn.kind === "webm") && size >= 1 << 20;   // video thật giấu dưới đuôi ảnh
+    const isVideo = sniffVideo || type.startsWith("video/") || VIDEO_EXT.test(loc) ||
       (type === "application/octet-stream" && size > 1 << 20) ||
       (type.startsWith("audio/") && size > 1 << 20);
     // "có thể là video": phần nhị phân lớn không phải ảnh/văn bản/font
     const maybe = !isVideo && size > 2 << 20 && !/^(text|image|font)\//.test(type) && !/css|javascript|json|html|xml|font/.test(type);
-    report.push({type: type || "?", enc: enc || "?", loc, size, used: isVideo || maybe});
+    const entry = {type: type || "?", enc: enc || "?", loc, size, used: isVideo || maybe, sn, body: file.slice(start, end)};
+    report.push(entry);
+    if (sn.kind === "ts" || sn.kind === "fmp4" || ((sn.kind === "mp4" || sn.kind === "webm") && !sniffVideo)) { entry.used = true; continue; }  // đoạn video: gom lại để ghép, không tạo thẻ riêng
+    if (sn.kind === "m3u8") { try { entry.pl = parsePlaylist(await partText(entry.body, enc)); } catch {} }
     if (loc && VIDEO_LINK.test(loc)) refs.add(loc);
     if (!(isVideo || maybe)) { await collectRefs(file.slice(start, end), type, enc, refs); continue; }
     const body = file.slice(start, end);
@@ -219,6 +225,103 @@ async function parseMht(file, report = [], refs = new Set()){
     out.push(new File([blob], name, {type: type.startsWith("video/") ? type : "video/mp4"}));
   }
   return out;
+}
+
+// ---------- PHÂN TÍCH CHỮ KÝ BYTE: đoán "ảnh" .jpg có thật là ảnh không, hay là đoạn video ngụy trang ----------
+// Đọc ~9 KB đầu của dữ liệu (đã giải mã base64 nếu cần) và tìm dấu hiệu thật:
+//  - MPEG-TS: byte 0x47 lặp lại mỗi 188 byte (có thể nằm sau một "đầu ảnh giả" ở đầu file)
+//  - fMP4/MP4: hộp 'ftyp' | 'styp' | 'moof' | 'sidx' | 'moov'   - WebM: 1A 45 DF A3   - Playlist: "#EXTM3U"
+async function headBytes(body, enc, n){
+  if (/base64/.test(enc)) {
+    const t = (await sliceText(body, 0, Math.ceil(n * 1.4) + 600)).replace(/[^A-Za-z0-9+/]/g, "");
+    return Uint8Array.from(atob(t.slice(0, t.length - (t.length % 4))), c => c.charCodeAt(0)).subarray(0, n);
+  }
+  return new Uint8Array(await body.slice(0, n).arrayBuffer());
+}
+function entropy(b){
+  const c = new Array(256).fill(0); for (const x of b) c[x]++;
+  let h = 0; for (const k of c) if (k) { const p = k / b.length; h -= p * Math.log2(p); } return h;
+}
+function sniff(b){
+  const n = b.length, ascii = (o, s) => [...s].every((ch, k) => b[o + k] === ch.charCodeAt(0));
+  if (!n) return {kind:"empty", offset:0};
+  if (ascii(0, "#EXTM3U") || (b[0] === 0xEF && ascii(3, "#EXTM3U"))) return {kind:"m3u8", offset:0};
+  for (let k = 0; k + 564 < n && k < 8192; k++)                       // MPEG-TS, kể cả khi có đầu giả phía trước
+    if (b[k] === 0x47 && b[k + 188] === 0x47 && b[k + 376] === 0x47 && b[k + 564] === 0x47)
+      return {kind:"ts", offset:k, fake: k ? (b[0] === 0xFF && b[1] === 0xD8 ? "đầu JPEG giả " + k + " byte" : "đầu lạ " + k + " byte") : ""};
+  for (let k = 0; k < Math.min(n - 8, 4096); k++) {                    // MP4 / fMP4, kể cả khi có đầu giả
+    const box = String.fromCharCode(b[k + 4], b[k + 5], b[k + 6], b[k + 7]);
+    if (box === "ftyp" || box === "moov") return {kind:"mp4", offset:k, fake: k ? "đầu lạ " + k + " byte" : ""};
+    if (box === "styp" || box === "moof" || box === "sidx") return {kind:"fmp4", offset:k, fake: k ? "đầu lạ " + k + " byte" : ""};
+  }
+  if (b[0] === 0x1A && b[1] === 0x45 && b[2] === 0xDF && b[3] === 0xA3) return {kind:"webm", offset:0};
+  if (b[0] === 0xFF && b[1] === 0xD8 && b[2] === 0xFF) return {kind:"jpeg", offset:0};
+  if (b[0] === 0x89 && ascii(1, "PNG")) return {kind:"png", offset:0};
+  if (ascii(0, "GIF8")) return {kind:"gif", offset:0};
+  if (ascii(0, "RIFF") && ascii(8, "WEBP")) return {kind:"webp", offset:0};
+  if (n >= 1024 && entropy(b.subarray(0, Math.min(n, 4096))) > 7.6) return {kind:"high", offset:0};
+  return {kind:"unknown", offset:0};
+}
+const SNIFF_LABEL = {
+  ts:"đoạn MPEG-TS (video thật)", fmp4:"đoạn fMP4 (video thật)", mp4:"MP4 (video/khởi tạo)", webm:"WebM (video thật)",
+  m3u8:"playlist HLS", jpeg:"ảnh JPEG thật", png:"ảnh PNG thật", gif:"ảnh GIF thật", webp:"ảnh WebP thật",
+  high:"dữ liệu ngẫu nhiên (có thể đã mã hóa)", unknown:"không nhận dạng", text:"văn bản", empty:"rỗng",
+};
+function parsePlaylist(txt){
+  const lines = txt.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+  const key = /#EXT-X-KEY:([^\r\n]+)/.exec(txt);
+  const method = key && (/METHOD=([A-Z0-9-]+)/.exec(key[1]) || [])[1];
+  return {segments: lines.filter(l => !l.startsWith("#")).length, method: method || "NONE", keyUri: key && (/URI="([^"]+)"/.exec(key[1]) || [])[1] || ""};
+}
+const natural = (a, b) => a.localeCompare(b, undefined, {numeric:true});
+
+// entries: [{name, size, sn, bytes: async () => Uint8Array}] — dùng cho cả phần nhúng trong MHT lẫn ảnh đã tải về máy
+function segPanel(entries, title){
+  const box = el("div", {className:"item"}, el("div", {style:"font-weight:600", textContent:title}));
+  const cnt = {}; for (const e of entries) cnt[e.sn.kind] = (cnt[e.sn.kind] || 0) + 1;
+  box.append(el("div", {className:"meta", textContent:
+    Object.entries(cnt).map(([k, v]) => `${v} × ${SNIFF_LABEL[k] || k}`).join(" · ") || "Không có dữ liệu để phân tích."}));
+  const segs = entries.filter(e => e.sn.kind === "ts" || e.sn.kind === "fmp4" || (e.sn.kind === "mp4" && e.size < 1 << 20) || e.sn.kind === "webm");
+  const fake = segs.filter(e => e.sn.fake).length;
+  const high = entries.filter(e => e.sn.kind === "high" || e.sn.kind === "unknown").length;
+  if (segs.length) {
+    const total = segs.reduce((t, e) => t + e.size, 0);
+    box.append(el("div", {className:"warn", textContent:
+      `✔ ${segs.length} phần thực chất là đoạn VIDEO (${fmt(total)})${fake ? `, ${fake} phần có đầu giả bị bỏ qua khi ghép` : ""}. Đúng như dấu hiệu "HLS ngụy trang đuôi ảnh".`}));
+    segs.sort((a, b) => natural(a.name, b.name));
+    const isMp4 = segs.some(e => e.sn.kind === "mp4" || e.sn.kind === "fmp4");
+    if (isMp4) segs.sort((a, b) => (b.sn.kind === "mp4") - (a.sn.kind === "mp4")); // phần khởi tạo (ftyp/moov) lên đầu
+    box.append(el("div", {className:"meta", textContent:`Thứ tự ghép (theo tên): ${segs[0].name.slice(-40)} … ${segs.at(-1).name.slice(-40)}`}));
+    const msg = el("div", {className:"meta"}), bar = el("progress", {max:100, value:0, hidden:true, style:"width:100%"});
+    const ext = isMp4 ? "mp4" : "ts";
+    const btn = el("button", {textContent:`Ghép ${segs.length} đoạn thành video .${ext}`});
+    btn.onclick = async () => {
+      btn.disabled = true; bar.hidden = true; msg.style.color = "";
+      try {
+        const w = await openWriter("video-ghep." + ext);
+        try {
+          for (let i = 0; i < segs.length; i++) { await w.write((await segs[i].bytes()).subarray(segs[i].sn.offset)); bar.hidden = false; bar.value = Math.round((i + 1) / segs.length * 100); }
+          await w.close();
+        } catch (e) { await w.abort(); throw e; }
+        msg.textContent = isMp4 ? "Đã ghép xong ✓." : "Đã ghép xong ✓. File .ts xem được bằng VLC/MPC-HC; muốn .mp4: ffmpeg -i video-ghep.ts -c copy video.mp4";
+      } catch (e) { msg.textContent = "Lỗi: " + e.message; msg.style.color = "#dc2626"; }
+      btn.disabled = false;
+    };
+    box.append(btn, bar, msg);
+  }
+  if (high) box.append(el("div", {className:"warn", textContent:
+    `${high} phần không có chữ ký video/ảnh nào mà dữ liệu rất ngẫu nhiên: có thể đã bị mã hóa (AES-128 của HLS) hoặc xáo trộn. Cần playlist .m3u8 có dòng #EXT-X-KEY và khóa từ máy chủ của bạn; app không đoán được.`}));
+  return box;
+}
+
+// Phân tích các file ảnh bạn đã tự tải về máy (từ danh sách link)
+async function analyzeFiles(files){
+  const entries = [];
+  for (const f of files) {
+    const sn = sniff(new Uint8Array(await f.slice(0, 9000).arrayBuffer()));
+    entries.push({name: f.name, size: f.size, sn, bytes: async () => new Uint8Array(await f.arrayBuffer())});
+  }
+  return entries;
 }
 
 // Đoán tiêu đề của một link từ chữ xung quanh nó (thẻ <a>, title/alt, tiêu đề, JSON "title")
@@ -302,7 +405,7 @@ function mhtDetails({name, size, report, refs}){
     `Chi tiết ${name} (${fmt(size)}): ${report.length} phần, ${refs.size} liên kết video không nhúng`}));
   if (!report.length) d.append(el("p", {className:"warn", textContent:"Không nhận ra cấu trúc MIME/boundary nào trong file này — có thể không phải MHTML chuẩn."}));
   const t = el("table", {style:"width:100%;font-size:.8rem;border-collapse:collapse;word-break:break-all"});
-  for (const x of report) t.append(el("tr", {}, ...[x.used ? "▶" : "", x.type, x.enc, fmt(x.size), x.loc.slice(0, 90)].map(c => el("td", {textContent:c, style:"border-top:1px solid var(--line);padding:2px 4px"}))));
+  for (const x of report) t.append(el("tr", {}, ...[x.used ? "▶" : "", x.type, x.sn ? "→ " + (SNIFF_LABEL[x.sn.kind] || x.sn.kind) : "", x.enc, fmt(x.size), x.loc.slice(0, 90)].map(c => el("td", {textContent:c, style:"border-top:1px solid var(--line);padding:2px 4px"}))));
   d.append(t);
   if (refs.size) d.append(el("p", {className:"warn", textContent:"Trang chỉ chứa liên kết tới video (video KHÔNG nằm trong file này): " + [...refs].slice(0, 10).join(" , ")}));
   return d;
@@ -521,6 +624,26 @@ function linkCard(u, kind, out, extra, label){
   card.append(row); return card;
 }
 
+// Giúp lấy các link ảnh về máy (chạy bằng lệnh của bạn) rồi phân tích/ghép ngay trong app
+function imageHelper(items){
+  const urls = items.map(i => i.u).sort((a, b) => natural(a.split("?")[0], b.split("?")[0]));
+  const psq = u => "'" + u.replace(/'/g, "''") + "'";
+  const bash = `i=0; for u in ${urls.map(shq).join(" ")}; do i=$((i+1)); curl -sSL -o "$(printf 'seg%05d.jpg' $i)" "$u"; done`;
+  const ps = `$i=0; @(${urls.map(psq).join(",")}) | ForEach-Object { $i++; Invoke-WebRequest $_ -OutFile ('seg{0:D5}.jpg' -f $i) }`;
+  const box = el("div"), row = el("div"), res = el("div");
+  for (const [label, text] of [["Sao chép danh sách link", urls.join("\n")], ["Lệnh tải · Mac/Linux", bash], ["Lệnh tải · Windows (PowerShell)", ps]]) {
+    const b = el("button", {className:"alt", textContent:label}); b.onclick = () => copyText(text, b); row.append(b);
+  }
+  const pick = el("label", {className:"btn"}, "Chọn các ảnh đã tải về để phân tích", el("input", {type:"file", multiple:true}));
+  pick.querySelector("input").onchange = async e => {
+    const files = [...e.target.files].sort((a, b) => natural(a.name, b.name));
+    res.replaceChildren(el("div", {className:"meta", textContent:"Đang phân tích " + files.length + " file…"}));
+    res.replaceChildren(segPanel(await analyzeFiles(files), `Kết quả phân tích ${files.length} file bạn đã tải về`));
+  };
+  box.append(el("div", {className:"meta", textContent:"Cách làm: (1) dán lệnh vào Terminal/PowerShell trong một thư mục trống, file lưu thành seg00001.jpg, seg00002.jpg… theo thứ tự số trong tên; (2) bấm nút dưới và chọn tất cả các file đó. Nếu lệnh báo 403, máy chủ cần thêm thông tin phiên (cookie/Referer)."}), row, pick, res);
+  return box;
+}
+
 async function showLinks(blob){
   const out = $("linkOut"); out.replaceChildren(el("p", {className:"meta", textContent:"Đang phân tích…"}));
   try {
@@ -540,6 +663,24 @@ async function showLinks(blob){
       `Tìm thấy ${refs.size} liên kết · ${report.length} phần trong file. Sau khi gộp: ${n("master")} master, ${n("variant")} theo chất lượng, ${n("playlist")} playlist khác, ${n("direct")} video trực tiếp, ${n("dash")} DASH, ${n("segment")} đoạn video, ${n("image")} ảnh, ${n("blob")} blob, ${dupN} link trùng đường dẫn.`}));
     if (!refs.size) out.append(el("p", {className:"warn", textContent:"Không thấy liên kết video nào. Thử dán toàn bộ nội dung file."}));
     else out.append(el("p", {className:"meta", textContent:"👉 Thử link đầu tiên của nhóm đầu bên dưới. Nếu lỗi/hết hạn, thử link kế tiếp."}));
+    // --- phân tích dữ liệu nhúng trong file (đọc chữ ký byte thật, bất kể đuôi/loại khai báo) ---
+    const emb = report.filter(r => r.sn && !["text", "empty", "m3u8"].includes(r.sn.kind)).map(r => ({
+      name: decodeSafe(r.loc.split("?")[0]) || "(không tên)", size: r.size, sn: r.sn,
+      bytes: async () => new Uint8Array(await (/base64/.test(r.enc) ? await b64Blob(r.body, "x") : r.body.slice(0, Math.max(0, r.body.size - 2))).arrayBuffer()),
+    }));
+    const embSet = new Set(report.map(r => decodeSafe(r.loc.split("?")[0])));
+    for (const r of report) if (r.pl) out.append(el("div", {className:"warn", textContent:
+      `Playlist HLS nhúng trong file: ${r.pl.segments} đoạn · mã hóa: ${r.pl.method}${r.pl.keyUri ? " · khóa tại " + r.pl.keyUri.split("?")[0].slice(0, 80) : ""}` +
+      (r.pl.method !== "NONE" ? " — video này được mã hóa, cần khóa từ máy chủ của bạn." : "")}));
+    if (emb.length) out.append(segPanel(emb, `🔬 Phân tích dữ liệu NHÚNG trong file (${emb.length} phần có nội dung)`));
+    if (groups.image) {
+      const got = groups.image.filter(it => embSet.has(decodeSafe(it.u.split("?")[0]))).length;
+      out.append(el("div", {className:"item"}, el("div", {style:"font-weight:600", textContent:`🔬 ${groups.image.length} link đuôi ảnh`}),
+        el("div", {className: got ? "meta" : "warn", textContent: got
+          ? `${got} link có nội dung nằm sẵn trong file (xem phân tích ở trên). ${groups.image.length - got} link chỉ là địa chỉ.`
+          : "Cả " + groups.image.length + " link chỉ là ĐỊA CHỈ: file .mht không chứa nội dung của chúng, nên app (offline) không thể phân tích hay ghép. Bạn cần tải chúng về máy trước, rồi chọn lại ở dưới để app đọc chữ ký byte và ghép."}),
+        imageHelper(groups.image)));
+    }
     let idx = 0; const all = [];
     for (const k of ["master", "variant", "playlist", "dash", "direct"]) {
       if (!groups[k]) continue;
