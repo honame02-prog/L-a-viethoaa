@@ -40,6 +40,16 @@
     <p style="opacity:.7;font-size:.9rem;margin:8px 0 0">Hoặc kéo thả vào đây.</p>
   </div>
 
+  <details class="item" id="linkTool" open>
+    <summary><b>Xem liên kết video trong file MHT</b></summary>
+    <p class="meta">Dán nội dung file <code>.mht</code> (hoặc một đoạn của nó) vào ô dưới, hoặc chọn file. App hiện <b>đầy đủ</b> các link video (kể cả phần sau dấu <code>?</code>). Mọi thứ xử lý ngay trên máy.</p>
+    <textarea id="mhtPaste" rows="5" style="width:100%;background:var(--bg);color:var(--fg);border:1px solid var(--line);border-radius:8px;padding:8px;font:12px monospace" placeholder="Dán nội dung .mht vào đây…"></textarea>
+    <div><button id="mhtGo">Phân tích đoạn dán</button>
+    <label class="btn alt">Chọn file .mht<input type="file" id="mhtFile" accept=".mht,.mhtml"></label></div>
+    <div id="linkOut"></div>
+    <p class="warn">Link thường chứa token truy cập. Đừng gửi cho người khác hoặc dán vào chat.</p>
+  </details>
+
   <div id="status" role="status"></div>
   <div id="list"></div>
 </main>
@@ -146,7 +156,10 @@ const MIME_EXT = {"video/mp4":"mp4","video/webm":"webm","video/ogg":"ogv","video
 async function parseMht(file, report = [], refs = new Set()){
   const head = await sliceText(file, 0, 65536);
   const bm = /boundary\s*=\s*"?([^"\r\n;]+)"?/i.exec(head);
-  if (!bm) return [];
+  if (!bm) { // đoạn dán không có phần đầu MIME: coi cả đoạn là văn bản
+    await collectRefs(file, "text/html", /=3D|=\r?\n/.test(head) ? "quoted-printable" : "8bit", refs);
+    return [];
+  }
   const marker = "--" + bm[1];
   // 1) quét file theo khối 8MB để tìm vị trí các boundary (không nạp cả file vào RAM)
   const CH = 8 << 20, pos = [];
@@ -175,7 +188,8 @@ async function parseMht(file, report = [], refs = new Set()){
     // "có thể là video": phần nhị phân lớn không phải ảnh/văn bản/font
     const maybe = !isVideo && size > 2 << 20 && !/^(text|image|font)\//.test(type) && !/css|javascript|json|html|xml|font/.test(type);
     report.push({type: type || "?", enc: enc || "?", loc, size, used: isVideo || maybe});
-    if (!(isVideo || maybe)) { collectRefs(rest.slice(m.index + m[0].length), type, refs, enc); continue; }
+    if (loc && VIDEO_LINK.test(loc)) refs.add(loc);
+    if (!(isVideo || maybe)) { await collectRefs(file.slice(start, end), type, enc, refs); continue; }
     const body = file.slice(start, end);
     let blob;
     if (enc === "base64") blob = await b64Blob(body, type);
@@ -188,10 +202,41 @@ async function parseMht(file, report = [], refs = new Set()){
   return out;
 }
 
-function collectRefs(txt, type, refs, enc){
-  if (!/html/.test(type)) return;
-  if (/quoted/.test(enc)) txt = txt.replace(/=\r?\n/g, "").replace(/=([0-9A-F]{2})/gi, (_, h) => String.fromCharCode(parseInt(h, 16)));
-  for (const r of txt.matchAll(/(?:https?:)?\/\/[^\s"'<>)]+?\.(?:mp4|webm|m3u8|mov|mkv)[^\s"'<>)]*|blob:[^\s"'<>)]+/gi)) refs.add(r[0]);
+const LINK_RE = /(?:https?:)?\/\/[^\s"'<>\\^`{}|]+|blob:[^\s"'<>\\]+/gi;
+const VIDEO_LINK = /m3u8|mpd(\?|$|#)|\.(mp4|webm|mov|mkv|m4v|ogv|ts|m4s)(\?|$|#)/i;
+
+function qpToBytes(t){
+  t = t.replace(/=\r?\n/g, "");
+  const out = [];
+  for (let i = 0; i < t.length; i++) {
+    const c = t.charCodeAt(i);
+    if (c === 61 && /^[0-9A-Fa-f]{2}$/.test(t.substr(i + 1, 2))) { out.push(parseInt(t.substr(i + 1, 2), 16)); i += 2; }
+    else out.push(c & 255);
+  }
+  return Uint8Array.from(out);
+}
+const unescapeText = t => t.replace(/&amp;/gi, "&").replace(/&#0*38;|&#x0*26;/gi, "&").replace(/&quot;/gi, '"')
+  .replace(/\\u0026/gi, "&").replace(/\\u002F/gi, "/").replace(/\\\//g, "/");
+
+async function partText(body, enc){
+  if (/quoted/.test(enc)) return new TextDecoder("utf-8").decode(qpToBytes(L1.decode(await body.arrayBuffer())));
+  if (/base64/.test(enc)) return new TextDecoder("utf-8").decode(await (await b64Blob(body, "text/plain")).arrayBuffer());
+  return new TextDecoder("utf-8").decode(await body.arrayBuffer());
+}
+
+// Rút mọi liên kết video từ một phần dạng văn bản (HTML, JS, JSON, playlist…). Chỉ đọc, không tải.
+async function collectRefs(body, type, enc, refs){
+  if (body.size > 40 << 20) return; // bỏ qua phần văn bản quá lớn
+  if (!/text|html|javascript|json|xml|mpegurl|css|svg/.test(type || "text")) return;
+  let txt; try { txt = unescapeText(await partText(body, enc)); } catch { return; }
+  if (/mpegurl/.test(type)) { // playlist nhúng: liệt kê cả dòng URL
+    for (const line of txt.split(/\r?\n/)) if (/^https?:\/\//i.test(line.trim())) refs.add(line.trim());
+  }
+  for (const m of txt.matchAll(LINK_RE)) {
+    let u = m[0].replace(/[.,;:!?)\]]+$/, "");
+    if (u.startsWith("//")) u = "https:" + u;
+    if (VIDEO_LINK.test(u) || u.startsWith("blob:")) refs.add(u);
+  }
 }
 
 async function b64Blob(body, type){
@@ -217,6 +262,33 @@ function mhtDetails({name, size, report, refs}){
   if (refs.size) d.append(el("p", {className:"warn", textContent:"Trang chỉ chứa liên kết tới video (video KHÔNG nằm trong file này): " + [...refs].slice(0, 10).join(" , ")}));
   return d;
 }
+
+// ---------- Công cụ xem liên kết ----------
+function copyText(text, btn){
+  const done = () => { const o = btn.textContent; btn.textContent = "Đã chép ✓"; setTimeout(() => btn.textContent = o, 1500); };
+  const ta = el("textarea", {value:text, style:"position:fixed;opacity:0"}); document.body.append(ta); ta.select();
+  let ok = false; try { ok = document.execCommand("copy"); } catch {}
+  ta.remove(); if (ok) return done();
+  if (navigator.clipboard) navigator.clipboard.writeText(text).then(done, () => btn.textContent = "Hãy bôi đen & chép tay");
+  else btn.textContent = "Hãy bôi đen & chép tay";
+}
+async function showLinks(blob){
+  const out = $("linkOut"); out.replaceChildren(el("p", {className:"meta", textContent:"Đang phân tích…"}));
+  try {
+    const report = [], refs = new Set();
+    await parseMht(blob, report, refs);
+    out.replaceChildren(el("p", {className:"meta", textContent:`Tìm thấy ${refs.size} liên kết video · ${report.length} phần trong file.`}));
+    if (!refs.size) out.append(el("p", {className:"warn", textContent:"Không thấy liên kết video nào. Thử dán toàn bộ nội dung file, hoặc kiểm tra bảng chi tiết khi chọn file ở khung chính."}));
+    for (const u of refs) {
+      const box = el("textarea", {value:u, readOnly:true, rows:Math.min(6, Math.ceil(u.length / 60)), style:"width:100%;background:var(--bg);color:var(--fg);border:1px solid var(--line);border-radius:8px;padding:6px;font:12px monospace"});
+      const b = el("button", {textContent:"Sao chép"}); b.onclick = () => copyText(u, b);
+      const hint = /m3u8/i.test(u) ? "Dạng HLS (.m3u8)" : /blob:/.test(u) ? "Dạng blob (chỉ tồn tại trong trang gốc)" : "Video trực tiếp";
+      out.append(el("div", {className:"item"}, el("div", {className:"meta", textContent:`${hint} · ${u.length} ký tự${u.includes("?") ? " · có tham số/token" : ""}`}), box, b));
+    }
+  } catch (err) { out.replaceChildren(el("p", {className:"warn", textContent:"Lỗi: " + err.message})); }
+}
+$("mhtGo").onclick = () => showLinks(new Blob([$("mhtPaste").value]));
+$("mhtFile").onchange = e => e.target.files[0] && showLinks(e.target.files[0]);
 
 // data: URI → Blob, tự giải mã (không dùng mạng)
 async function fetchData(uri){
