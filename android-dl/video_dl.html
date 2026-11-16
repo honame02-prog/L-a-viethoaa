@@ -1,0 +1,254 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<title>Tải video từ link bài viết</title>
+<style>
+:root {
+  --bg: #f8f9fb; --fg: #1a1d23; --card: #ffffff; --border: #e2e5ea;
+  --accent: #2563eb; --accent-hover: #1d4ed8; --accent-light: #dbeafe;
+  --green: #16a34a; --green-bg: #dcfce7; --red: #dc2626; --red-bg: #fef2f2;
+  --gray: #6b7280; --shadow: 0 1px 3px rgba(0,0,0,.08);
+  --radius: 12px;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0f1117; --fg: #e4e6eb; --card: #1a1d25; --border: #2d3140;
+    --accent: #5b92ff; --accent-hover: #7aabff; --accent-light: #1e2a4a;
+    --green: #4ade80; --green-bg: #0a2618; --red: #f87171; --red-bg: #2a1010;
+    --gray: #9ca3af; --shadow: 0 1px 3px rgba(0,0,0,.3);
+  }
+}
+* { box-sizing: border-box; margin: 0; -webkit-tap-highlight-color: transparent; }
+body { background: var(--bg); color: var(--fg); font: 15px/1.5 -apple-system, "Segoe UI", Roboto, sans-serif; }
+.container { max-width: 600px; margin: 0 auto; padding: 20px 16px; }
+h1 { font-size: 1.3rem; font-weight: 700; margin-bottom: 2px; }
+.subtitle { color: var(--gray); margin-bottom: 16px; font-size: .9rem; }
+.card {
+  background: var(--card); border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 16px; margin-bottom: 12px; box-shadow: var(--shadow);
+}
+.input-group { display: flex; gap: 8px; }
+.input-group input {
+  flex: 1; padding: 12px 14px; border: 1px solid var(--border); border-radius: 8px;
+  background: var(--bg); color: var(--fg); font: inherit; outline: none;
+  transition: border-color .2s; min-width: 0;
+}
+.input-group input:focus { border-color: var(--accent); }
+.btn {
+  padding: 12px 20px; border: none; border-radius: 8px; font: inherit; font-weight: 600;
+  cursor: pointer; transition: all .2s; display: inline-flex; align-items: center; gap: 6px;
+  white-space: nowrap;
+}
+.btn-primary { background: var(--accent); color: #fff; }
+.btn-primary:hover { background: var(--accent-hover); }
+.btn-primary:disabled { opacity: .5; cursor: not-allowed; }
+.btn-sm { padding: 10px 16px; font-size: .9rem; }
+.btn-outline { background: transparent; color: var(--accent); border: 1px solid var(--accent); }
+.spinner { display: inline-block; width: 16px; height: 16px; border: 2px solid #fff4;
+  border-top-color: #fff; border-radius: 50%; animation: spin .6s linear infinite; }
+.spinner-dark { border-color: var(--accent); border-top-color: transparent; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.status { padding: 10px 14px; border-radius: 8px; margin: 10px 0; font-size: .9rem; }
+.status-info { background: var(--accent-light); color: var(--accent); }
+.status-ok { background: var(--green-bg); color: var(--green); }
+.status-err { background: var(--red-bg); color: var(--red); }
+.video-list { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
+.video-item {
+  background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 12px;
+  transition: border-color .2s;
+}
+.video-top { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+.video-info { flex: 1; min-width: 0; }
+.video-badges { display: flex; gap: 5px; flex-wrap: wrap; margin-bottom: 4px; }
+.badge {
+  display: inline-block; padding: 2px 7px; border-radius: 4px; font-size: .7rem;
+  font-weight: 600; text-transform: uppercase;
+}
+.badge-ext { background: var(--accent-light); color: var(--accent); }
+.badge-size { background: var(--bg); border: 1px solid var(--border); color: var(--gray); }
+.badge-src { background: var(--bg); border: 1px solid var(--border); color: var(--gray); }
+.video-url {
+  font-size: .75rem; color: var(--gray); overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; max-width: 100%;
+}
+.dl-status { font-size: .85rem; margin-top: 6px; }
+.dl-status.ok { color: var(--green); }
+.dl-status.err { color: var(--red); }
+.progress-bar { width: 100%; height: 5px; background: var(--border); border-radius: 3px; overflow: hidden; margin-top: 6px; }
+.progress-fill { height: 100%; background: var(--accent); transition: width .3s; border-radius: 3px; }
+details summary { cursor: pointer; font-size: .9rem; color: var(--gray); }
+.hdr-row { display: flex; gap: 6px; margin-top: 6px; }
+.hdr-row input { flex: 1; padding: 8px 10px; border: 1px solid var(--border); border-radius: 6px;
+  background: var(--bg); color: var(--fg); font-size: .85rem; }
+footer { text-align: center; margin-top: 24px; font-size: .75rem; color: var(--gray); }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>Tải video từ link bài viết</h1>
+  <p class="subtitle">Dán hoặc chia sẻ link bài viết → tự động tìm và tải video.</p>
+
+  <div class="card">
+    <div class="input-group">
+      <input type="url" id="urlInput" placeholder="Dán link bài viết vào đây..." enterkeyhint="search">
+      <button class="btn btn-primary" id="scanBtn" onclick="scanUrl()">Tìm</button>
+    </div>
+    <details style="margin-top: 8px">
+      <summary>Tùy chọn nâng cao</summary>
+      <div id="headers">
+        <div class="hdr-row">
+          <input placeholder="Header (VD: Cookie)" class="hdr-key">
+          <input placeholder="Giá trị" class="hdr-val">
+        </div>
+      </div>
+      <button class="btn btn-outline btn-sm" style="margin-top:6px;padding:6px 12px;font-size:.8rem" onclick="addHeader()">+ Thêm</button>
+    </details>
+  </div>
+
+  <div id="statusArea"></div>
+  <div id="resultArea"></div>
+
+  <footer>Chỉ kết nối tới trang bạn chọn. Video lưu vào thư mục Download.</footer>
+</div>
+
+<script>
+"use strict";
+const statusArea = document.getElementById("statusArea");
+const resultArea = document.getElementById("resultArea");
+
+function showStatus(msg, type) {
+  statusArea.innerHTML = '<div class="status status-' + type + '">' + msg + '</div>';
+}
+
+function addHeader() {
+  const div = document.getElementById("headers");
+  const row = document.createElement("div");
+  row.className = "hdr-row";
+  row.innerHTML = '<input placeholder="Header" class="hdr-key"><input placeholder="Giá trị" class="hdr-val">';
+  div.appendChild(row);
+}
+
+function getHeadersJson() {
+  const h = {};
+  document.querySelectorAll(".hdr-row").forEach(row => {
+    const k = row.querySelector(".hdr-key").value.trim();
+    const v = row.querySelector(".hdr-val").value.trim();
+    if (k && v) h[k] = v;
+  });
+  return JSON.stringify(h);
+}
+
+function scanUrl() {
+  const url = document.getElementById("urlInput").value.trim();
+  if (!url) { showStatus("Chưa nhập URL.", "err"); return; }
+  if (!url.startsWith("http://") && !url.startsWith("https://")) {
+    showStatus("Chỉ hỗ trợ URL http:// hoặc https://", "err"); return;
+  }
+
+  const btn = document.getElementById("scanBtn");
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span>';
+  resultArea.innerHTML = "";
+  showStatus("Đang tải trang và phân tích...", "info");
+
+  // Chạy trong thread riêng qua AndroidBridge (không block UI)
+  setTimeout(function() {
+    try {
+      const raw = AndroidBridge.extractVideos(url, getHeadersJson());
+      const data = JSON.parse(raw);
+      if (data.error) {
+        showStatus("Lỗi: " + data.error, "err");
+      } else if (!data.videos || data.videos.length === 0) {
+        showStatus("Không tìm thấy video nào.", "err");
+      } else {
+        showStatus("Tìm thấy " + data.videos.length + " video!", "ok");
+        renderVideos(data.videos, url);
+      }
+    } catch (e) {
+      showStatus("Lỗi: " + e.message, "err");
+    }
+    btn.disabled = false;
+    btn.innerHTML = "Tìm";
+  }, 50);
+}
+
+function renderVideos(videos, pageUrl) {
+  let html = '<div class="video-list">';
+  videos.forEach(function(v, i) {
+    const badges = [];
+    if (v.ext) badges.push('<span class="badge badge-ext">' + v.ext.toUpperCase() + '</span>');
+    if (v.size && v.size !== "?") badges.push('<span class="badge badge-size">' + v.size + '</span>');
+    badges.push('<span class="badge badge-src">' + v.source + '</span>');
+
+    // Tên file
+    let fname = v.url.split("/").pop().split("?")[0] || "video";
+    fname = fname.replace(/[^a-zA-Z0-9._-]/g, "_");
+    if (v.ext && !fname.toLowerCase().endsWith("." + v.ext)) fname += "." + v.ext;
+    if (!fname || fname === "." + v.ext) fname = "video_" + i + "." + (v.ext || "mp4");
+
+    html += '<div class="video-item">' +
+      '<div class="video-top">' +
+        '<div class="video-info">' +
+          '<div class="video-badges">' + badges.join("") + '</div>' +
+          '<div class="video-url">' + escHtml(v.masked_url) + '</div>' +
+        '</div>' +
+        '<button class="btn btn-primary btn-sm" id="dlbtn-' + i + '" ' +
+          'onclick="dlVideo(' + i + ',\'' + encURI(v.url) + '\',\'' + encURI(pageUrl) + '\',\'' + encURI(fname) + '\')">Tải</button>' +
+      '</div>' +
+      '<div id="dlstat-' + i + '"></div>' +
+    '</div>';
+  });
+  html += '</div>';
+  resultArea.innerHTML = html;
+}
+
+function dlVideo(idx, eUrl, ePage, eFname) {
+  const btn = document.getElementById("dlbtn-" + idx);
+  const stat = document.getElementById("dlstat-" + idx);
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span>';
+  stat.innerHTML = '<div class="dl-status" style="color:var(--accent)">Đang tải...</div>';
+
+  setTimeout(function() {
+    try {
+      const raw = AndroidBridge.downloadVideo(
+        decodeURIComponent(eUrl),
+        decodeURIComponent(ePage),
+        decodeURIComponent(eFname),
+        getHeadersJson()
+      );
+      const r = JSON.parse(raw);
+      if (r.ok) {
+        stat.innerHTML = '<div class="dl-status ok">✓ Đã lưu: ' + escHtml(r.file) + ' (' + fmtSize(r.size) + ')</div>';
+        btn.innerHTML = "✓";
+        btn.style.background = "var(--green)";
+      } else {
+        stat.innerHTML = '<div class="dl-status err">✘ ' + escHtml(r.error) + '</div>';
+        btn.innerHTML = "Lỗi";
+        btn.style.background = "var(--red)";
+      }
+    } catch (e) {
+      stat.innerHTML = '<div class="dl-status err">✘ ' + escHtml(e.message) + '</div>';
+      btn.innerHTML = "Lỗi";
+      btn.style.background = "var(--red)";
+    }
+  }, 50);
+}
+
+function escHtml(s) { const d = document.createElement("div"); d.textContent = s; return d.innerHTML; }
+function encURI(s) { return encodeURIComponent(s); }
+function fmtSize(n) {
+  if (n < 1024) return n + " B";
+  if (n < 1048576) return (n / 1024).toFixed(1) + " KB";
+  if (n < 1073741824) return (n / 1048576).toFixed(1) + " MB";
+  return (n / 1073741824).toFixed(1) + " GB";
+}
+
+document.getElementById("urlInput").addEventListener("keydown", function(e) {
+  if (e.key === "Enter") scanUrl();
+});
+</script>
+</body>
+</html>

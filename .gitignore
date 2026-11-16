@@ -1,4 +1,6 @@
 android/out/
 android/release.keystore
 android/.gradle/
+android-dl/out/
+android-dl/release.keystore
 __pycache__/

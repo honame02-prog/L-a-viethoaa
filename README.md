@@ -51,4 +51,12 @@ python video_dl.py --serve --port 9000  # đổi cổng
 5. Xóa file gốc bằng công cụ xóa an toàn nếu cần (xóa thường không xóa dữ liệu khỏi đĩa).
 
 ## Android (APK)
-`android/VideoOffline.apk` — WebView nạp đúng `index.html`, **không khai báo quyền INTERNET** (Android chặn mạng ở cấp hệ điều hành). File lưu vào Download. Tự build: `ANDROID_HOME=<sdk> android/build.sh` (JDK 17+, platform-34, build-tools 34.0.0). Khoá ký `android/release.keystore` không đưa lên git — hãy giữ lại.
+
+### `android/VideoOffline.apk` — Trích xuất video OFFLINE
+WebView nạp đúng `index.html`, **không khai báo quyền INTERNET** (Android chặn mạng ở cấp hệ điều hành). File lưu vào Download. Tự build: `ANDROID_HOME=<sdk> android/build.sh` (JDK 17+, platform-34, build-tools 34.0.0). Khoá ký `android/release.keystore` không đưa lên git — hãy giữ lại.
+
+### `android-dl/VideoDL.apk` — Tải video từ link bài viết
+WebView + Java bridge để tải trang, trích xuất video và lưu vào Download. **CÓ quyền INTERNET** (cần để tải trang và video). Chỉ dùng HTTPS, chặn HTTP cleartext.
+- **Nhận link chia sẻ**: mở app khác (trình duyệt, mạng xã hội) → Chia sẻ → chọn "Tải Video" → tự động dán link và tìm video.
+- Trích xuất: thẻ `<video>`, Open Graph, Twitter Card, JSON-LD, iframe embed, regex quét link `.mp4`/`.m3u8`/`.webm`.
+- Tự build: `ANDROID_HOME=<sdk> android-dl/build.sh` (JDK 17+, platform-34, build-tools 34.0.0).
