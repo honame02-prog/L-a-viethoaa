@@ -15,6 +15,27 @@ Kiểm tra và tách video từ link `.m3u8` **không cần ffmpeg** (chỉ cầ
 - `python hls_tool.py`: tải, bỏ "đầu ảnh giả", giải mã AES-128 (khóa công khai của HLS), ghép đúng thứ tự thành `.ts`/`.mp4`.
 - An toàn: chỉ thư viện chuẩn; in **mọi máy chủ** sẽ kết nối và hỏi `[y/N]` trước; chặn redirect sang máy chủ chưa xác nhận; kiểm tra chứng chỉ HTTPS; che token khi hiển thị; từ chối `file://`; **từ chối DRM** (SAMPLE-AES) và không cố vượt DRM.
 
+## Tải video từ link bài viết: `video_dl.py`
+Dán link bài viết HTTPS bất kỳ → tự tìm mọi video nhúng trong trang và tải về. Hỗ trợ thẻ `<video>`, Open Graph, Twitter Card, JSON-LD `VideoObject`, `<iframe>` nhúng, regex quét link `.mp4`/`.m3u8`/`.webm` trong mã nguồn.
+
+**CLI:**
+```bash
+python video_dl.py https://example.com/bai-viet       # tìm & tải video
+python video_dl.py https://example.com/bai-viet --list # chỉ liệt kê
+python video_dl.py https://example.com/bai-viet --quality 720 -o video.mp4
+python video_dl.py --header "Referer: https://example.com/"
+```
+
+**Giao diện web:**
+```bash
+python video_dl.py --serve              # mở http://127.0.0.1:8765
+python video_dl.py --serve --port 9000  # đổi cổng
+```
+
+- Yêu cầu: Python 3 + `beautifulsoup4` (tùy chọn, tăng độ chính xác; không có vẫn chạy bằng regex).
+- An toàn: in mọi máy chủ sẽ kết nối và hỏi xác nhận; chặn redirect sang host chưa xác nhận; kiểm tra chứng chỉ HTTPS; che token khi hiển thị.
+- Giao diện web chạy server cục bộ trên máy bạn, không gửi dữ liệu đi đâu khác.
+
 ## Mô hình bảo mật (nói thẳng giới hạn)
 - Không thư viện, CDN, font, analytics. Không có mã nào gọi mạng, trừ các phép *thử* trong "Kiểm tra cách ly mạng" (đều nhắm `*.invalid`, bị chặn trước khi gửi).
 - CSP `default-src 'none'; connect-src 'none'; form-action 'none'; frame-src 'none'` → trình duyệt tự chặn mọi kết nối, kể cả khi mã có lỗi. Đã kiểm chứng bằng máy chủ cục bộ: **0 kết nối nhận được**.
